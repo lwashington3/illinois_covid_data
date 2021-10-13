@@ -1,4 +1,4 @@
-#Illinois COVID-19 Data Scraper
+# Illinois COVID-19 Data Scraper
 ## Len Washington
 
 A bot created to scrape data related to COVID-19 daily from the Illinois Department of Public Health.
