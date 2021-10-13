@@ -22,7 +22,6 @@ namespace CoronaScraper
             {
                 yield return demographic;
             }
-            // return CountyDemographics.GetEnumerator();
         }
 
         IEnumerator IEnumerable.GetEnumerator()
@@ -33,6 +32,7 @@ namespace CoronaScraper
         #endregion
 
         public CountyDemographic this[int index] => CountyDemographics[index];
+        public CountyDemographic this[Index index] => CountyDemographics[index];
         public CountyDemographic this[string name]
         {
             get
