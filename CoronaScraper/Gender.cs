@@ -22,6 +22,7 @@ namespace CoronaScraper
             {
                 yield return demographic;
             }
+            // return CountyDemographics.GetEnumerator();
         }
 
         IEnumerator IEnumerable.GetEnumerator()

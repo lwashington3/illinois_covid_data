@@ -31,6 +31,7 @@ namespace CoronaScraper
         #endregion
 
         public IllinoisTestingResults this[int index] => StateTestingResults[index];
+        public IllinoisTestingResults this[Index index] => StateTestingResults[index];
         public IllinoisTestingResults this[DateTime date]
         {
             get
@@ -45,7 +46,6 @@ namespace CoronaScraper
                 return null;
             }
         }
-        public IllinoisTestingResults this[Index index] => StateTestingResults[index];
     }
     public class LastUpdatedDate
     {

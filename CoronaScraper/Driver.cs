@@ -20,19 +20,63 @@ namespace CoronaScraper
         public static readonly HttpClient client = new ();
         public SheetsService Service { get; set; }
         private UserCredential Credential { get; set; }
-        public string ApplicationName { get; set; }
+        public static string ApplicationName => "Illinois Coronavirus Data Scraper";
         public static string[] DEFAULT_SCOPES = { SheetsService.Scope.Spreadsheets };
-
-        static void Main(string[] args)
+        
+        public static int Main(string[] args)
         {
-            Driver driver = CreateDriver(args);
+            Driver driver;
+            try
+            {
+                driver = CreateDriver(args);
+            } catch(ArgumentException e)
+            {
+                Console.WriteLine(e);
+                return 1;
+            }
 
-            Console.WriteLine("Scraping Overall Data");
-            driver.ScrapeOverallData(false);
-            Console.WriteLine("Scraping Gender Data");
-            driver.ScrapeGenderData();
-            Console.WriteLine("Scraping Age/Race Data");
-            driver.ScrapeAgeRaceData();
+            List<Thread> threads = new()
+            {
+                new(() => {
+                    Console.WriteLine("Scraping Overall Data");
+                    driver.ScrapeOverallData(false);
+                    Console.WriteLine("Finished scraping Overall Data");
+                }),
+                new(() => {
+                    Console.WriteLine("Scraping Gender Data");
+                    driver.ScrapeGenderData();
+                    Console.WriteLine("Finished scraping Gender Data");
+                }),
+                new(() => {
+                    Console.WriteLine("Scraping Age/Race Data");
+                    driver.ScrapeAgeRaceData();
+                    Console.WriteLine("Finished scraping Age/Race Data");
+                }),
+                new(() => {
+                    Console.WriteLine("Scraping Statewide Vaccine Data");
+                    driver.ScrapeIllinoisVaccineData();
+                    Console.WriteLine("Finished scraping Statewide Vaccine Data");
+                }),
+                new(() => {
+                    Console.WriteLine("Scraping Vaccine Administration Data");
+                    driver.ScrapeIllinoisVaccineAdministration();
+                    Console.WriteLine("Finished scraping Vaccine Administration Data");
+                }),
+            };
+            try
+            {
+                foreach (Thread thread in threads)
+                {
+                    thread.Start();
+                }
+            }
+            catch (HttpListenerException)
+            {
+                Console.WriteLine("Not connected to internet. Please try again.");
+                return -1;
+            }
+
+            return 0;
         }
 
         public static Driver CreateDriver(string[] args)
@@ -52,7 +96,11 @@ namespace CoronaScraper
             {
                 return new(args[0]);
             }
-            return new();
+            else if(Properties.Resources.credentials != null)
+            {
+                return new();
+            }
+            throw new ArgumentException("You must pass a credentials file into the program or have it built in. If you passed the credentials location, make sure it is a valid location.");
         }
 
         public Driver() : this(Properties.Resources.credentials, DEFAULT_SCOPES) { }
@@ -61,7 +109,6 @@ namespace CoronaScraper
         public Driver(byte[] credentialLocation, IEnumerable<string> scopes) : this(new MemoryStream(credentialLocation), scopes) { }
         public Driver(Stream credentialStream, IEnumerable<string> scopes)
         {
-            ApplicationName = "Illinois Coronavirus Data Scraper";
             Credential = CreateCredential(credentialStream, scopes);
             Service = CreateSheetsService();
         }
@@ -70,8 +117,7 @@ namespace CoronaScraper
             string credPath = "token";
             return GoogleWebAuthorizationBroker.AuthorizeAsync(
                     GoogleClientSecrets.FromStream(stream).Secrets,
-                    scopes,
-                    "user",
+                    scopes, "user",
                     CancellationToken.None,
                     new FileDataStore(credPath, true)).Result;
         }
@@ -90,6 +136,7 @@ namespace CoronaScraper
             var response = client.GetStringAsync(link);
             return await response;
         }
+        #region Scrape Functions
         public void ScrapeOverallData()
         {
             ScrapeOverallData(false);
@@ -145,60 +192,16 @@ namespace CoronaScraper
             #region Formatting
             BatchUpdateSpreadsheetRequest format = new();
             format.Requests = new List<Request>()
-                {
-                    new Request { RepeatCell = new()
-                    {
-                        Fields = "userEnteredFormat.numberFormat",
-                        Range = new()
-                        {
-                            StartColumnIndex = 0,
-                            EndColumnIndex = 1,
-                            StartRowIndex = 1
-                        },
-                        Cell = new CellData()
-                        {
-                            UserEnteredFormat = new CellFormat()
-                            {
-                                NumberFormat = new NumberFormat()
-                                {
-                                    Type = "DATE",
-                                    Pattern = "MM/dd/YYYY"
-                                }
-                            }
-                        }
-                    }
-                },
-                new Request // Number formatting
-                {
-                    RepeatCell = new RepeatCellRequest
-                    {
-                        Fields = "userEnteredFormat.numberFormat",
-                        Range = new()
-                        {
-                            StartColumnIndex = 1,
-                            EndColumnIndex = 10,
-                            StartRowIndex = 1
-                        },
-                        Cell = new CellData()
-                        {
-                            UserEnteredFormat = new CellFormat()
-                            {
-                                NumberFormat = new NumberFormat()
-                                {
-                                    Type = "NUMBER",
-                                    Pattern = "###,##0"
-                                }
-                            }
-                        }
-                    }
-                }
+            {
+                GetDateFormatRequest(0, 0, 1, 1),
+                GetNumberFormatRequest(0, 1, 10, 1),
              };
             Service.Spreadsheets.BatchUpdate(format, Link.Overall).Execute();
             #endregion
         }
         public void ScrapeGenderData()
         {
-            string link = Link.Age_Race;
+            string link = Link.Age_Race_Site;
             string response = CallUrl(link).Result;
             Root data = JsonConvert.DeserializeObject<Root>(response);
             CountyDemographic illinois = data["Illinois"];
@@ -206,8 +209,6 @@ namespace CoronaScraper
             IList<IList<object>> values = new List<IList<object>>();
 
             List<Tuple<string, string, int, int?>> tuples = new();
-            Spreadsheet spreadsheet = Service.Spreadsheets.Get(Link.Gender).Execute();
-
             List<DateTime> uploadDates = new();
 
             foreach (string sheetName in new string[] { "Confirmed Cases", "Tested", "Deaths"})
@@ -216,15 +217,7 @@ namespace CoronaScraper
                 int row = dataResponse.Values.Count + 2;
                 DateTime lastUpload = DateTime.Parse(dataResponse.Values[^1][0].ToString());
 
-                int? id = null;
-
-                foreach(Sheet sheet in spreadsheet.Sheets)
-                {
-                    if(sheet.Properties.Title == sheetName)
-                    {
-                        id = sheet.Properties.SheetId;
-                    }
-                }
+                int? id = GetSheetId(Link.Gender, sheetName);
 
                 tuples.Add(new(sheetName.Replace(" ", ""), sheetName, row, id));
                 uploadDates.Add(lastUpload);
@@ -251,54 +244,8 @@ namespace CoronaScraper
                     BatchUpdateSpreadsheetRequest format = new();
                     format.Requests = new List<Request>()
                     {
-                        new Request { RepeatCell = new()
-                        {
-                            Fields = "userEnteredFormat.numberFormat",
-                            Range = new()
-                            {
-                                SheetId = tuple.Item4,
-                                StartColumnIndex = 0,
-                                EndColumnIndex = 1,
-                                StartRowIndex = 1
-                            },
-                            Cell = new CellData()
-                            {
-                                UserEnteredFormat = new CellFormat()
-                                {
-                                    NumberFormat = new NumberFormat()
-                                    {
-                                        Type = "DATE",
-                                        Pattern = "MM/dd/YYYY"
-                                    }
-                                }
-                            }
-                        }
-                    },
-                    new Request // Number formatting
-                    {
-                        RepeatCell = new RepeatCellRequest
-                        {
-                            Fields = "userEnteredFormat.numberFormat",
-                            Range = new()
-                            {
-                                SheetId = tuple.Item4,
-                                StartColumnIndex = 1,
-                                EndColumnIndex = 5,
-                                StartRowIndex = 1
-                            },
-                            Cell = new CellData()
-                            {
-                                UserEnteredFormat = new CellFormat()
-                                {
-                                    NumberFormat = new NumberFormat()
-                                    {
-                                        Type = "NUMBER",
-                                        Pattern = "###,##0"
-                                    }
-                                }
-                            }
-                        }
-                    }
+                        GetDateFormatRequest(tuple.Item4, 0, 1, 1),
+                        GetNumberFormatRequest(tuple.Item4, 1, 5, 1),
                     };
                     Service.Spreadsheets.BatchUpdate(format, Link.Gender).Execute();
                     #endregion
@@ -307,7 +254,7 @@ namespace CoronaScraper
         }
         public void ScrapeAgeRaceData()
         {
-            string link = Link.Age_Race;
+            string link = Link.Age_Race_Site;
             string response = CallUrl(link).Result;
 
             Root data = JsonConvert.DeserializeObject<Root>(response);
@@ -317,18 +264,18 @@ namespace CoronaScraper
 
             List<Tuple<string, string>> tuples = new()
             {
-                new(Link.Age_Race_Confirmed_Cases, "Confirmed Cases"),
-                new(Link.Age_Race_Tested, "Tested"),
-                new(Link.Age_Race_Deaths, "Deaths")
+                new(Link.Age_Race.Confirmed_Cases, "Confirmed Cases"),
+                new(Link.Age_Race.Tested, "Tested"),
+                new(Link.Age_Race.Deaths, "Deaths")
             };
 
             foreach(var tuple in tuples)
             {
                 string spreadsheetID = tuple.Item1;
                 string selectedProperty = tuple.Item2.Replace(" ", "");
-                #region Check if Sheet Exists
-                Spreadsheet spreadsheet = Service.Spreadsheets.Get(spreadsheetID).Execute();
-                bool alreadyCreated = false;
+                #region Check if Exists
+                bool alreadyCreated = GetSheet(spreadsheetID, newSheetName) != null;
+                /**Spreadsheet spreadsheet = Service.Spreadsheets.Get(spreadsheetID).Execute();
                 foreach(Sheet check in spreadsheet.Sheets)
                 {
                     if (check.Properties.Title == newSheetName)
@@ -336,7 +283,7 @@ namespace CoronaScraper
                         alreadyCreated = true;
                         break;
                     }
-                }
+                }*/
 
                 if (alreadyCreated)
                 {
@@ -360,16 +307,24 @@ namespace CoronaScraper
                     new Request { AddSheet = sheetRequest }
                 };
                 var newSheet = Service.Spreadsheets.BatchUpdate(body, spreadsheetID).Execute();
-                int? newSheetId = null;
-                Sheet sheet = null;
-                foreach (Sheet updatedSheet in newSheet.UpdatedSpreadsheet.Sheets)
+                Sheet sheet = GetSheet(spreadsheetID, newSheetName);
+                int? newSheetId;
+                if(sheet == null)
+                {
+                    newSheetId = null;
+                }
+                else
+                {
+                    newSheetId = sheet.Properties.SheetId;
+                }
+                /**foreach (Sheet updatedSheet in newSheet.UpdatedSpreadsheet.Sheets)
                 {
                     if (updatedSheet.Properties.Title == newSheetName)
                     {
                         newSheetId = updatedSheet.Properties.SheetId;
                         sheet = updatedSheet;
                     }
-                }
+                }*/
 
                 #endregion
                 #region Formatting Data For Upload
@@ -454,46 +409,9 @@ namespace CoronaScraper
                 BatchUpdateSpreadsheetRequest format = new();
                 format.Requests = new List<Request>()
                 {
-                    new Request{ UpdateSheetProperties = new()
-                    {
-                        Fields = "gridProperties.frozenRowCount",
-                        Properties = new()
-                        {
-                            SheetId = newSheetId,
-                            GridProperties = new()
-                            {
-                                FrozenRowCount = 1,
-                                FrozenColumnCount = 1
-                            }
-                        }
-                    } 
-                },
-                    new Request // Number formatting
-                    {
-                        RepeatCell = new RepeatCellRequest
-                        {
-                            Fields = "userEnteredFormat.numberFormat",
-                            Range = new()
-                            {
-                                SheetId = newSheetId,
-                                StartColumnIndex = 1,
-                                EndColumnIndex = 10,
-                                StartRowIndex = 1,
-                            },
-                            Cell = new CellData()
-                            {
-                                UserEnteredFormat = new CellFormat()
-                                {
-                                    NumberFormat = new NumberFormat()
-                                    {
-                                        Type = "NUMBER",
-                                        Pattern = "###,##0"
-                                    }
-                                }
-                            }
-                        }
-                    }
-                    };
+                    GetFrozenRequest(newSheetId, 1, 1),
+                    GetNumberFormatRequest(newSheetId, 1, 10, 1),
+                };
                 Service.Spreadsheets.BatchUpdate(format, tuple.Item1).Execute();
                 #endregion
                 #region Bar Chart
@@ -727,7 +645,272 @@ namespace CoronaScraper
                 #endregion
             }
         }
+        public void ScrapeIllinoisVaccineData()
+        {
+            string spreadsheetId = Link.Vaccine.StateWide;
+            string response = CallUrl(Link.Vaccine_Details).Result;
+            StateWideVaccine data = JsonConvert.DeserializeObject<StateWideVaccine>(response);
+            data.CorrectPercentages();
 
+            List<IList<object>> values = new();
+            ValueRange dataResponse = Service.Spreadsheets.Values.Get(spreadsheetId, "Illinois Vaccine Data!A2:A").Execute();
+            DateTime lastUpload;
+            if(dataResponse.Values != null)
+            {
+                lastUpload = DateTime.Parse(dataResponse.Values[^1][0].ToString());
+            }
+            else {
+                lastUpload = DateTime.MinValue;
+            }
+            if (lastUpload != data.ReportDate)
+            {
+                values.Add(new List<object>() { data.ReportDate.ToString("MM/dd/yyyy"), data.Total_Doses, data.Total_Administered, data.AdministeredRollingAvg,
+                                                                                        data.AdministeredToIllinoisans_Fully_5, data.AdministeredToIllinoisans_Fully_5_Percent,
+                                                                                        data.AdministeredToIllinoisans_One_5, data.AdministeredToIllinoisans_One_5_Percent,
+                                                                                        data.AdministeredToIllinoisans_Fully_12, data.AdministeredToIllinoisans_Fully_12_Percent,
+                                                                                        data.AdministeredToIllinoisans_One_12, data.AdministeredToIllinoisans_One_12_Percent,
+                                                                                        data.AdministeredToIllinoisans_Fully_18, data.AdministeredToIllinoisans_Fully_18_Percent,
+                                                                                        data.AdministeredToIllinoisans_One_18, data.AdministeredToIllinoisans_One_18_Percent,
+                                                                                        data.AdministeredToIllinoisans_Fully_65, data.AdministeredToIllinoisans_Fully_65_Percent,
+                                                                                        data.AdministeredToIllinoisans_One_65, data.AdministeredToIllinoisans_One_65_Percent,
+                                                                                        data.AdministeredToIllinois_Fully_5, data.AdministeredToIllinois_Fully_5_Percent,
+                                                                                        data.AdministeredToIllinois_One_5, data.AdministeredToIllinois_One_5_Percent,
+                                                                                        data.AdministeredToIllinois_Fully_12, data.AdministeredToIllinois_Fully_12_Percent,
+                                                                                        data.AdministeredToIllinois_One_12, data.AdministeredToIllinois_One_12_Percent,
+                                                                                        data.AdministeredToIllinois_Fully_18, data.AdministeredToIllinois_Fully_18_Percent,
+                                                                                        data.AdministeredToIllinois_One_18, data.AdministeredToIllinois_One_18_Percent,
+                                                                                        data.AdministeredToIllinois_Fully_65, data.AdministeredToIllinois_Fully_65_Percent,
+                                                                                        data.AdministeredToIllinois_One_65, data.AdministeredToIllinois_One_65_Percent,});
+            }
+            else
+            {
+                return; //No need to keep going, the spreadsheet is up to date
+            }
+
+
+            #region Upload
+            ValueRange range = new()
+            {
+                Values = values
+            };
+            SpreadsheetsResource.ValuesResource.AppendRequest request = Service.Spreadsheets.Values.Append(range, spreadsheetId, "Illinois Vaccine Data!A2:T");
+            request.ValueInputOption = SpreadsheetsResource.ValuesResource.AppendRequest.ValueInputOptionEnum.USERENTERED;
+            request.Execute();
+            #endregion
+            #region Formatting
+            BatchUpdateSpreadsheetRequest format = new();
+            format.Requests = new List<Request>()
+            {
+                GetDateFormatRequest(0, 0, 1, 1),
+                GetNumberFormatRequest(0, 1, 3, 1),
+                GetNumberFormatRequest(0, 3, 4, 1, "###,##0.##")
+             };
+
+            for(int i = 4; i < 36; i++)
+            {
+                format.Requests.Add(i % 2 == 0 ? GetNumberFormatRequest(0, i, i+1, 1) : GetNumberFormatRequest(0, i, i + 1, 1, "#0.##%"));
+            }
+
+            Service.Spreadsheets.BatchUpdate(format, spreadsheetId).Execute();
+            #endregion
+        }
+        public void ScrapeIllinoisVaccineAdministration(bool addEachEntry = false)
+        {
+            ScrapeIllinoisVaccineAdministration(addEachEntry, new Link.County[] { Link.County.Illinois, Link.County.Chicago });
+        }
+        public void ScrapeIllinoisVaccineAdministration(Link.County[] counties)
+        {
+            ScrapeIllinoisVaccineAdministration(false, counties);
+        }
+        
+        public void ScrapeIllinoisVaccineAdministration(bool addEachEntry, Link.County[] counties)
+        {
+            string spreadsheetId = Link.Vaccine.Administration;
+            foreach (Link.County county in counties) 
+            {
+                string countyName = Link.TranslateEnum(county);
+                string sheetName = $"{countyName} Vaccine Administration";
+                string response = CallUrl(Link.Vaccine_Administration+countyName).Result;
+                int? sheetId = GetSheetId(spreadsheetId, sheetName);
+                
+                Administration administrations = JsonConvert.DeserializeObject<Administration>(response);
+
+                VaccineAdministration administration;//Split these into two different sheets, the report date is always a day begin
+
+                if (administrations.CurrentVaccineAdministration != null && administrations.CurrentVaccineAdministration.Report_Date == (DateTime.Today - new TimeSpan(1, 0, 0, 0)))
+                {
+                    administration = administrations.CurrentVaccineAdministration;
+                }
+                else
+                {
+                    administration = administrations[^1];
+                }
+
+                List<IList<object>> values = new();
+                ValueRange dataResponse = Service.Spreadsheets.Values.Get(spreadsheetId, $"{countyName} Vaccine Administration!A2:A").Execute();
+                DateTime lastUpload;
+                if (dataResponse.Values != null)
+                {
+                    lastUpload = DateTime.Parse(dataResponse.Values[^1][0].ToString());
+                }
+                else
+                {
+                    lastUpload = DateTime.MinValue;
+                }
+                if (lastUpload != administration.Report_Date)
+                {
+                    string population = administration != null ? "" + administration.Population : "";
+                    string administeredCount = administration != null ? "" + administration.AdministeredCount : "";
+                    string rollingAverage = administration != null ? "" + administration.AdministeredCountRollAvg : "";
+                    string PersonsFullyVaccinated = administration != null ? "" + administration.PersonsFullyVaccinated : "";
+                    string PctVaccinatedPopulation = administration != null ? "" + administration.PctVaccinatedPopulation : "";
+                    string PersonsVaccinatedOneDose = administration != null ? "" + administration.PersonsVaccinatedOneDose : "";
+                    string PctVaccinatedOneDosePopulation = administration != null ? "" + administration.PctVaccinatedOneDosePopulation : "";
+                    string BoosterDoseAdministered = administration != null ? "" + administration.BoosterDoseAdministered : "";
+                    string AllocatedDoses = administration != null ? "" + administration.AllocatedDoses : "";
+                    string inventoryReportDate = administration != null ? "" + administration.InventoryReportDate.ToString("MM/dd/yyyy") : "";
+                    string lhdReportedInventory = administration != null ? "" + administration.LHDReportedInventory : "";
+                    string communityReportedInventory = administration != null ? "" + administration.CommunityReportedInventory : "";
+                    string totalReportedInventory = administration != null ? "" + administration.TotalReportedInventory : "";
+                    values.Add(new List<object>() { administration.Report_Date.ToString("MM/dd/yyyy"), administeredCount, rollingAverage, population, PersonsVaccinatedOneDose, PctVaccinatedOneDosePopulation,
+                                                                                        PersonsFullyVaccinated, PctVaccinatedPopulation, BoosterDoseAdministered, AllocatedDoses, inventoryReportDate,
+                                                                                        lhdReportedInventory, communityReportedInventory, totalReportedInventory});
+                }
+                else
+                {
+                    continue; //No need to keep going, the spreadsheet is up to date
+                }
+
+
+                #region Upload
+                ValueRange range = new()
+                {
+                    Values = values
+                };
+                SpreadsheetsResource.ValuesResource.AppendRequest request = Service.Spreadsheets.Values.Append(range, spreadsheetId, $"{countyName} Vaccine Administration!A2:N");
+                request.ValueInputOption = SpreadsheetsResource.ValuesResource.AppendRequest.ValueInputOptionEnum.USERENTERED;
+                request.Execute();
+                #endregion
+                #region Formatting
+                BatchUpdateSpreadsheetRequest format = new();
+                format.Requests = new List<Request>()
+                {
+                    GetDateFormatRequest(sheetId, 0, 1, 1),
+                    GetNumberFormatRequest(sheetId, 1, 2, 1),
+                    GetNumberFormatRequest(sheetId, 2, 3, 1, "#0.##"),
+                    GetNumberFormatRequest(sheetId, 3, 14, 1),
+                    GetNumberFormatRequest(sheetId, 5, 6, 1, "#0.##%"),
+                    GetNumberFormatRequest(sheetId, 7, 8, 1, "#0.##%"),
+                    GetDateFormatRequest(sheetId, 10, 11, 1)
+                 };
+
+                Service.Spreadsheets.BatchUpdate(format, spreadsheetId).Execute();
+                #endregion
+            }
+        }
+        #endregion
+        #region Get Sheet Property Functions
+        private Sheet GetSheet(string spreadsheetId, string sheetName)
+        {
+            foreach (Sheet sheet in Service.Spreadsheets.Get(spreadsheetId).Execute().Sheets)
+            {
+                if (sheet.Properties.Title == sheetName)
+                {
+                    return sheet;
+                }
+            }
+            return null;
+        }
+        private int? GetSheetId(string spreadsheetId, string sheetName)
+        {
+            Sheet sheet = GetSheet(spreadsheetId, sheetName);
+            if (sheet == null)
+            {
+                return null;
+            }
+            return sheet.Properties.SheetId;
+        }
+        #endregion
+        #region Get Format Request Functions
+        public static Request GetDateFormatRequest(int? sheetId, int? startColumnIndex, int? endColumnIndex, int? startRowIndex = 1)
+        {
+            return new Request
+            {
+                RepeatCell = new()
+                {
+                    Fields = "userEnteredFormat.numberFormat",
+                    Range = new()
+                    {
+                        SheetId = sheetId,
+                        StartColumnIndex = startColumnIndex,
+                        EndColumnIndex = endColumnIndex,
+                        StartRowIndex = startRowIndex
+                    },
+                    Cell = new CellData()
+                    {
+                        UserEnteredFormat = new CellFormat()
+                        {
+                            NumberFormat = new NumberFormat()
+                            {
+                                Type = "DATE",
+                                Pattern = "MM/dd/YYYY"
+                            }
+                        }
+                    }
+                }
+            };
+        }
+
+        public static Request GetNumberFormatRequest(int? sheetId, int? startColumnIndex, int? endColumnIndex, int? startRowIndex = 1, string pattern="###,##0")
+        {
+            return new Request
+            {
+                RepeatCell = new()
+                {
+                    Fields = "userEnteredFormat.numberFormat",
+                    Range = new()
+                    {
+                        SheetId = sheetId,
+                        StartColumnIndex = startColumnIndex,
+                        EndColumnIndex = endColumnIndex,
+                        StartRowIndex = startRowIndex
+                    },
+                    Cell = new CellData()
+                    {
+                        UserEnteredFormat = new CellFormat()
+                        {
+                            NumberFormat = new NumberFormat()
+                            {
+                                Type = "NUMBER",
+                                Pattern = pattern
+                            }
+                        }
+                    }
+                }
+            };
+        }
+
+        public static Request GetFrozenRequest(int? sheetId, int? frozenRowCount, int? frozenColumnCount)
+        {
+            return new Request
+            {
+                UpdateSheetProperties = new()
+                {
+                    Fields = "gridProperties.frozenRowCount",
+                    Properties = new()
+                    {
+                        SheetId = sheetId,
+                        GridProperties = new()
+                        {
+                            FrozenRowCount = frozenRowCount,
+                            FrozenColumnCount = frozenColumnCount
+                        }
+                    }
+                }
+            };
+        }
+
+        #endregion
         public static Color ConvertColor(string color)
         {
             Regex regex = new (@"rgb\((\d+),(\d+),(\d+)\)");
